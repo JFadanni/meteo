@@ -66,6 +66,38 @@ function fetchSun({ lat, lon }) {
 // Strip HTML/entities from ARPAV CDATA safely (never injected as HTML).
 const plain = s => new DOMParser().parseFromString(s || '', 'text/html').body.textContent.replace(/\s+/g, ' ').trim();
 
+// ARPAV day text is HTML like "<b>Tempo atteso: </b>…<br /><b>Precipitazioni: </b>…".
+// Split it into labelled sections (as plain text, never injected as HTML).
+function splitSections(html) {
+  const body = new DOMParser().parseFromString(html || '', 'text/html').body;
+  const sections = []; let cur = null;
+  for (const n of body.childNodes) {
+    if (n.nodeName === 'B' || n.nodeName === 'STRONG') {
+      cur = { label: n.textContent.replace(/[:\s]+$/, '').trim(), text: '' }; sections.push(cur);
+    } else if (n.nodeName !== 'BR') {
+      if (!cur) { cur = { label: '', text: '' }; sections.push(cur); }
+      cur.text += n.textContent;
+    }
+  }
+  let previsore = null, attendibilita = null;
+  const out = [];
+  for (const s of sections) {
+    s.text = s.text.replace(/\s*Previsore:\s*([^\n]+)/i, (_, p) => { previsore = p.trim(); return ''; }).replace(/\s+/g, ' ').trim();
+    if (/^attendibilit/i.test(s.label)) { attendibilita = s.text; continue; }
+    if (s.label || s.text) out.push(s);
+  }
+  return { sections: out, previsore, attendibilita };
+}
+
+const MESI = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'];
+function italianDateToYMD(s) {
+  const m = /(\d{1,2})\s+([a-zà]+)/i.exec(s || ''); if (!m) return null;
+  const mon = MESI.indexOf(m[2].toLowerCase()); if (mon < 0) return null;
+  const today = Core.todayYMD(); let y = Number(today.slice(0, 4));
+  if (mon === 0 && today.slice(5, 7) === '12') y++;            // bulletin crossing new year
+  return `${y}-${String(mon + 1).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+}
+
 async function fetchArpav(zoneId) {
   const [widget, utenti] = await Promise.allSettled([getXML(ARPAV_XML + 'bollettino_widget.xml'), getXML(ARPAV_XML + 'bollettino_utenti.xml')]);
   if (widget.status !== 'fulfilled') throw widget.reason;
@@ -86,14 +118,23 @@ async function fetchArpav(zoneId) {
 
   let text = null;
   if (utenti.status === 'fulfilled') {
-    const id = zoneId <= 3 ? 'DM' : 'MV';
-    const b = utenti.value.querySelector(`bollettino[bollettinoid="${id}"]`) || utenti.value.querySelector('bollettino');
+    // Dolomiti Meteo for mountains/prealps, Meteo Pianura for plain and coast, Meteo Veneto otherwise
+    const id = [1, 2, 3, 4, 8].includes(zoneId) ? 'DM' : zoneId === 5 ? 'MV' : 'MP';
+    const b = utenti.value.querySelector(`bollettino[bollettinoid="${id}"]`) ||
+      utenti.value.querySelector('bollettino[bollettinoid="MV"]') || utenti.value.querySelector('bollettino');
     if (b) {
       text = {
         name: b.getAttribute('name'), title: b.getAttribute('title'),
         evol: plain(b.querySelector('evoluzionegenerale')?.textContent),
         avviso: plain(b.querySelector('avviso')?.textContent),
-        days: [...b.querySelectorAll('giorno')].map(g => ({ data: g.getAttribute('data'), text: plain(g.querySelector('text')?.textContent) })),
+        fenomeni: plain(b.querySelector('fenomeniparticolari')?.textContent),
+        days: [...b.querySelectorAll('giorno')].map(g => ({
+          data: g.getAttribute('data'),
+          date: italianDateToYMD(g.getAttribute('data')),
+          maps: [...g.querySelectorAll('img')].map(i => ({ src: i.getAttribute('src'), caption: i.getAttribute('caption') || '' }))
+            .filter(m => /^https:\/\//.test(m.src)),
+          ...splitSections(g.querySelector('text')?.textContent),
+        })),
       };
     }
   }
@@ -137,6 +178,7 @@ function render(raw, zone, inVeneto) {
   const det = raw.det ? Core.parseDeterministic(raw.det) : null;
   const ens = raw.ens ? Core.parseEnsemble(raw.ens) : null;
   const res = Core.analyse({ det, ens, sun: raw.sun, arpav: raw.arpav });
+  renderDayBar(res);
   renderHero(res);
   renderDays(res, raw.arpav);
   renderArpavText(raw.arpav, inVeneto);
@@ -207,7 +249,7 @@ function renderDays({ days, best }) {
   const box = $('#days'); box.replaceChildren();
   for (const day of days) {
     const v = Core.verdict(day.score, day.dryFrac);
-    const card = el('article', { class: `day v-${v.key}${best && day.date === best.date ? ' best' : ''}` });
+    const card = el('article', { id: `day-${day.date}`, class: `day v-${v.key}${best && day.date === best.date ? ' best' : ''}` });
 
     card.append(el('header', { class: 'day-head' },
       el('div', {},
@@ -234,13 +276,14 @@ function renderDays({ days, best }) {
       // metrics
       card.append(el('dl', { class: 'metrics' },
         metric('Prob. pioggia', pct(day.P), 'ARPAV + ensemble + modelli'),
-        metric('Ensemble', day.Pens != null ? pct(day.Pens) : '–', day.nMem ? `${day.nMem} membri` : 'n.d.'),
+        metric('Temperatura', day.tMax != null ? `${Math.round(day.tMin)}–${Math.round(day.tMax)}°` : '–', 'min–max nella finestra'),
         metric('Modelli con pioggia', day.Pdet != null ? pct(day.Pdet) : '–', `${day.perModel.length} modelli`),
         metric('Asciugatura', day.dryAt ? `entro le ${fmtH(day.dryAt)}` : `${Math.round(day.dryFrac * 100)}%`, `finestra ${fmtH(day.start)}–${fmtH(day.end)}`),
         metric('Umidità', day.rhMean != null ? `${Math.round(day.rhMean)}%` : '–', 'media nella finestra'),
         metric('Raffiche', day.gust != null ? `${Math.round(day.gust)} km/h` : '–', 'max nella finestra'),
       ));
 
+      card.append(ensembleBox(day));
       card.append(hourStrip(day));
       if (day.conf) card.append(el('div', { class: 'conf' }, `Affidabilità: ${day.conf}`, day.fogArpav ? ' · prevista nebbia/nubi basse' : ''));
 
@@ -278,14 +321,109 @@ function hourStrip(day) {
 
 function renderArpavText(arpav, inVeneto) {
   const box = $('#arpav-text'); box.replaceChildren();
-  if (!inVeneto) { box.append(el('p', { class: 'muted' }, 'ARPAV copre solo il Veneto: per questa località si usano solo i modelli.')); return; }
+  if (!inVeneto) { box.hidden = false; box.append(el('p', { class: 'muted' }, 'ARPAV copre solo il Veneto: per questa località si usano solo i modelli.')); return; }
   if (!arpav?.text) { box.hidden = true; return; }
   box.hidden = false;
-  const t = arpav.text;
-  box.append(el('h2', {}, `ARPAV — ${t.name}`), el('p', { class: 'muted' }, t.title));
-  if (t.avviso) box.append(el('p', { class: 'avviso' }, t.avviso));
-  if (t.evol) box.append(el('p', {}, el('b', {}, 'Evoluzione generale: '), t.evol));
-  for (const g of t.days) if (g.text) box.append(el('p', {}, el('b', {}, `${g.data}: `), g.text.replace(/^Previsione:\s*/i, '')));
+  const t = arpav.text, today = Core.todayYMD();
+  box.append(el('div', { class: 'ab-head' },
+    el('span', { class: 'src' }, 'ARPAV · PREVISIONE UFFICIALE'),
+    el('h2', {}, t.name),
+    el('p', { class: 'muted small' }, [t.title, arpav.updated ? `aggiornamento ${arpav.updated}` : null].filter(Boolean).join(' · '))));
+  if (t.avviso) box.append(el('div', { class: 'ab-alert' }, el('b', {}, '⚠ Avviso: '), t.avviso));
+  if (t.fenomeni) box.append(el('div', { class: 'ab-alert warn' }, el('b', {}, 'Fenomeni particolari: '), t.fenomeni));
+  if (t.evol) box.append(el('div', { class: 'ab-evol' }, el('h3', {}, 'Situazione generale'), el('p', {}, t.evol)));
+
+  let shown = 0;
+  for (const g of t.days) {
+    if (g.date && g.date < today) continue;                     // yesterday's afternoon slot
+    const d = g.date ? Math.round((Date.parse(g.date) - Date.parse(today)) / 864e5) : null;
+    const secs = g.sections || [];
+    const lead = secs[0];
+    const det = el('details', { class: 'ab-day' });
+    if (shown++ < 2) det.open = true;
+    det.append(el('summary', {},
+      el('div', { class: 'ab-sum' },
+        el('span', { class: 'ab-dayname' }, g.date ? `${dayName(g.date, d)} ${dateShort(g.date)}` : g.data),
+        g.attendibilita ? el('span', { class: `badge ${reliabilityClass(g.attendibilita)}` }, `Attendibilità ${g.attendibilita.toLowerCase()}`) : null),
+      lead ? el('div', { class: 'ab-preview' }, lead.text) : null));
+    if (g.maps?.length) {
+      det.append(el('div', { class: 'ab-maps' }, g.maps.map(m => el('a', { href: m.src, target: '_blank', rel: 'noopener' },
+        el('img', { src: m.src, alt: `Mappa ARPAV ${m.caption}`, loading: 'lazy' }),
+        el('span', {}, m.caption.replace(/^\d+\s+\S+\s*/, '') || 'mappa')))));
+    }
+    det.append(el('dl', { class: 'ab-secs' }, secs.map(sx => el('div', { class: 'ab-sec' },
+      el('dt', {}, el('span', { class: 'ab-ico', 'aria-hidden': 'true' }, sectionIcon(sx.label)), shortLabel(sx.label)),
+      el('dd', {}, sx.text)))));
+    if (g.previsore) det.append(el('p', { class: 'muted small' }, `Previsore: ${g.previsore}`));
+    box.append(det);
+  }
+}
+
+function sectionIcon(label) {
+  const l = label.toLowerCase();
+  if (/precip/.test(l)) return '🌧';
+  if (/temperat/.test(l)) return '🌡';
+  if (/vent/.test(l)) return '💨';
+  if (/mare/.test(l)) return '🌊';
+  if (/neve|zero termico/.test(l)) return '❄';
+  return '🌤';
+}
+const shortLabel = l => (/^tendenza/i.test(l) ? 'Tendenza' : /^previsione/i.test(l) ? 'Previsione' : l || 'Previsione');
+const reliabilityClass = a => (/ottima|buona|alta/i.test(a) ? 'ok' : /discreta|media/i.test(a) ? 'mid' : 'low');
+
+// Sticky top bar: the 5 days with their scores, always visible.
+function renderDayBar({ days, best }) {
+  const bar = $('#daybar'); bar.replaceChildren();
+  for (const day of days) {
+    const v = day.lateToday ? { key: 'na' } : Core.verdict(day.score, day.dryFrac);
+    const isBest = best && day.date === best.date;
+    const label = day.d === 0 ? 'Oggi' : day.d === 1 ? 'Domani' : shortWeekday(day.date);
+    bar.append(el('button', {
+      type: 'button', class: `db-item v-${v.key}${isBest ? ' best' : ''}`,
+      'aria-label': `${label} ${dateShort(day.date)}: punteggio ${day.lateToday ? 'non disponibile' : day.score}`,
+      onclick: () => document.getElementById(`day-${day.date}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+    },
+      el('span', { class: 'db-day' }, label),
+      el('span', { class: 'db-date' }, dateShort(day.date)),
+      el('span', { class: 'db-score' }, day.lateToday || day.score == null ? '–' : String(day.score)),
+      el('span', { class: 'db-best' }, isBest ? '★ migliore' : ' ')));
+  }
+}
+const shortWeekday = ymd => { const [y, m, d] = ymd.split('-').map(Number); const s = new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('it-IT', { weekday: 'short', timeZone: 'UTC' }); return s.charAt(0).toUpperCase() + s.slice(1).replace('.', ''); };
+
+// Ensemble box: one dot per scenario, blue = rain while the laundry is out.
+function ensembleBox(day) {
+  const box = el('div', { class: 'ens' });
+  if (day.Pens == null) {
+    box.append(el('div', { class: 'ens-head' }, el('b', {}, 'Ensemble'), el('span', { class: 'muted' }, ' non disponibile per questo giorno')));
+    return box;
+  }
+  const head = day.nWet === 0 ? `Nessuno dei ${day.nMem} scenari prevede pioggia`
+    : day.nWet === day.nMem ? `Tutti i ${day.nMem} scenari prevedono pioggia`
+    : `${day.nWet} scenari su ${day.nMem} prevedono pioggia`;
+  box.append(el('div', { class: 'ens-head' },
+    el('div', {}, el('div', { class: 'ens-kicker' }, 'ENSEMBLE · SCENARI POSSIBILI'), el('b', {}, head)),
+    el('span', { class: `ens-pct ${day.Pens >= 0.5 ? 'hi' : day.Pens >= 0.2 ? 'mid' : 'lo'}` }, pct(day.Pens))));
+  for (const src of day.ensBy) {
+    const dots = el('div', { class: 'dots', 'aria-hidden': 'true' });
+    for (let i = 0; i < src.n; i++) dots.append(el('i', { class: i < src.wet ? 'wet' : '' }));
+    box.append(el('div', { class: 'ens-row' },
+      el('span', { class: 'ens-src' }, src.name, el('small', {}, `${src.wet}/${src.n}`)), dots));
+  }
+  let amount = '';
+  if (day.wetMeanMm != null) {
+    const mm = day.wetMeanMm;
+    const kind = mm < 1 ? 'qualche goccia' : mm < 5 ? 'pioggia debole' : mm < 15 ? 'pioggia moderata' : 'pioggia forte';
+    amount = ` Negli scenari piovosi cadono in media ${mm.toFixed(1).replace('.', ',')} mm (${kind}).`;
+  }
+  box.append(el('p', { class: 'ens-note' },
+    el('span', { class: 'legend-dot wet' }), 'pioggia mentre il bucato è steso  ',
+    el('span', { class: 'legend-dot' }), 'asciutto.', amount));
+  box.append(el('details', { class: 'ens-why' }, el('summary', {}, 'Cos’è un ensemble?'),
+    el('p', {}, 'Invece di una sola previsione, ECMWF e il servizio meteo tedesco (ICON-EU) fanno girare lo stesso modello decine di volte, ' +
+      'ogni volta con condizioni iniziali leggermente diverse, per tener conto dell’incertezza. Ogni pallino è uno di questi scenari: ' +
+      'la quota di pallini blu è la probabilità che piova (≥0,3 mm) durante la finestra di stesura.')));
+  return box;
 }
 
 // ---------------- location UI ----------------

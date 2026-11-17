@@ -104,9 +104,13 @@ const Core = (() => {
     return { time: h.time, idx, models };
   }
 
+  const ENS_NAMES = { ecmwf_ifs025: 'ECMWF', icon_eu: 'ICON-EU' };
   function parseEnsemble(json) {
     const h = json.hourly, idx = indexByTime(h.time);
-    const members = Object.keys(h).filter(k => k.startsWith('precipitation')).map(k => h[k]);
+    const members = Object.keys(h).filter(k => k.startsWith('precipitation')).map(k => {
+      const src = ENS_MODELS.find(id => k.includes(id)) || 'other';
+      return { src, data: h[k] };
+    });
     return { time: h.time, idx, members };
   }
 
@@ -195,20 +199,25 @@ const Core = (() => {
       const spread = cums.length > 1 ? std(cums) / Math.max(avg(cums), 0.05) : null;
 
       // --- ensemble ---
-      let Pens = null, nMem = 0, hourlyEns = hours.map(() => null);
+      // Each member is one plausible scenario; count those that are wet in the drying window.
+      let Pens = null, nMem = 0, nWet = 0, wetMeanMm = null, hourlyEns = hours.map(() => null);
+      const ensBy = [];
       if (ens && hours.length) {
-        let wet = 0; const hw = hours.map(() => [0, 0]);
+        const hw = hours.map(() => [0, 0]), by = new Map(); let wetSum = 0;
         for (const mem of ens.members) {
-          let sum = 0, ok = true;
-          hours.forEach(({ key }, k) => {
-            const i = ens.idx.get(key); const v = i == null ? null : mem[i];
-            if (v == null) { ok = false; return; }
-            sum += v; hw[k][1]++; if (v >= RAIN_HOUR_MM) hw[k][0]++;
-          });
-          if (!ok) continue;
-          nMem++; if (sum >= RAIN_DAY_MM) wet++;
+          const vals = hours.map(({ key }) => { const i = ens.idx.get(key); return i == null ? null : mem.data[i]; });
+          if (vals.some(v => v == null)) continue;           // member doesn't reach this day
+          const sum = vals.reduce((a, b) => a + b, 0), wet = sum >= RAIN_DAY_MM;
+          vals.forEach((v, k) => { hw[k][1]++; if (v >= RAIN_HOUR_MM) hw[k][0]++; });
+          nMem++; if (wet) { nWet++; wetSum += sum; }
+          if (!by.has(mem.src)) by.set(mem.src, { name: ENS_NAMES[mem.src] || mem.src, n: 0, wet: 0 });
+          const b = by.get(mem.src); b.n++; if (wet) b.wet++;
         }
-        if (nMem >= 10) { Pens = wet / nMem; hourlyEns = hw.map(([a, b]) => (b ? a / b : null)); }
+        if (nMem >= 10) {
+          Pens = nWet / nMem; hourlyEns = hw.map(([a, b]) => (b ? a / b : null));
+          wetMeanMm = nWet ? wetSum / nWet : null;
+          ensBy.push(...by.values());
+        }
       }
 
       // --- ARPAV ---
@@ -249,7 +258,8 @@ const Core = (() => {
 
       days.push({
         date, d, start, end, sunrise, sunset, lateToday, hours, meanRates, hourlyP,
-        perModel, cumE, dryFrac, dryAt, Pdet, Pens, nMem, Parpav, P, rainMean, gust, rhMean,
+        perModel, cumE, dryFrac, dryAt, Pdet, Pens, nMem, nWet, wetMeanMm, ensBy,
+        tMax: wavg(m => m.tMax), tMin: wavg(m => m.tMin), Parpav, P, rainMean, gust, rhMean,
         spread, arpavDay, fogArpav, score, conf, rainFrom,
       });
     }
