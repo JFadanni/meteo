@@ -36,22 +36,36 @@
 
   <main>
     <div id="status" class="status" hidden></div>
+    <div id="load" class="load" role="group" aria-label="Tipo di bucato"></div>
     <section id="hero" class="hero"><p class="muted">Caricamento…</p></section>
     <h2 class="sec">Dettaglio giorno per giorno</h2>
     <section id="days" class="days"></section>
     <section id="arpav-text" class="arpav-text"></section>
 
     <details class="method">
-      <summary>Come funziona il punteggio</summary>
-      <p><b>Asciugatura</b>: per ogni ora tra circa 1,5 h dopo l'alba e il tramonto si calcola un tasso di evaporazione
-        di tipo Penman per un panno bagnato steso, usando temperatura, umidità (deficit di pressione di vapore), vento e
-        radiazione solare di ciascun modello (ICON-2I, ECMWF, ICON, Météo-France, UKMO, GFS), poi mediato tra i modelli.
-        Il totale è confrontato con ~1 mm di evaporazione, che serve ad asciugare un normale carico di cotone.</p>
-      <p><b>Pioggia</b>: probabilità di ≥0,3 mm durante la finestra di asciugatura, combinata al 40% ARPAV (previsione
-        ufficiale di zona), 40% ensemble (ECMWF 51 + ICON-EU 40 membri), 20% quota di modelli deterministici con pioggia.
-        Oltre l'orizzonte del bollettino ARPAV si usano solo i modelli.</p>
-      <p><b>Punteggio</b> = 100 × asciugatura<sup>0,8</sup> × (1 − prob. pioggia)<sup>1,3</sup>, ridotto con raffiche forti
-        (&gt;60 km/h) e con nebbia/umidità molto alta. ≥70 ottimo, 50–69 buono, 30–49 incerto, &lt;30 asciuga in casa.</p>
+      <summary>Come funziona il calcolo</summary>
+      <h4>Fonti</h4>
+      <p><b>ARPAV</b>: previsione ufficiale per la zona (cielo, probabilità di pioggia per mattina/pomeriggio) con la sua
+        <i>attendibilità</i>, che ne regola il peso. <b>Modelli</b>: per oggi e domani pesano di più quelli ad alta risoluzione
+        (MeteoSvizzera ICON-CH1 1 km e ICON-CH2, ItaliaMeteo ICON-2I, DWD ICON-D2, Météo-France AROME), dal terzo giorno
+        ECMWF IFS 9 km e l’IA ECMWF AIFS; completano ICON-EU, ARPEGE, UK Met Office, GFS.
+        <b>Ensemble</b>: ICON-D2-EPS, ICON-CH1/CH2-EPS, ECMWF ENS, ICON-EU-EPS (fino a 143 scenari).
+        Per oggi e domani si confronta anche la previsione emessa 24 ore prima: se cambia molto, l’affidabilità scende.</p>
+      <h4>Asciugatura</h4>
+      <p>Per ogni ora da ~1,5 h dopo l’alba al tramonto si calcola l’evaporazione da un tessuto bagnato appeso in verticale
+        con l’equazione di Penman: <i>λE = (Δ·Rn + 2·h·VPD)/(Δ+γ)</i>.</p>
+      <ul>
+        <li><b>Umidità</b>: entra come deficit di pressione di vapore (VPD); nell’ultimo 25% dell’asciugatura l’acqua è legata
+          alle fibre e l’evaporazione rallenta tanto più quanto l’aria è umida (sopra l’85% quasi si ferma).</li>
+        <li><b>Sole</b>: radiazione diretta su un telo verticale (il sole basso d’inverno lo colpisce meglio di una superficie
+          orizzontale), diffusa e riflessa dal suolo, meno la perdita infrarossa verso il cielo sereno.</li>
+        <li><b>Vento</b>: coefficiente di scambio h = 2,8 + 3,0·u (Watmuff 1977), con il vento a 10 m ridotto all’altezza dello stendino.</li>
+      </ul>
+      <p>L’acqua da togliere dipende dal carico: leggero 0,3, misto 0,5, pesante 0,8 kg per m² di tessuto (dopo centrifuga).</p>
+      <h4>Punteggio</h4>
+      <p>100 × asciugatura<sup>0,8</sup> × (1 − prob. pioggia)<sup>1,3</sup>, ridotto con raffiche &gt;60 km/h e con nebbia o
+        umidità molto alta. La probabilità di pioggia combina ARPAV (40–55% secondo l’attendibilità), ensemble e modelli.
+        ≥70 ottimo, 50–69 buono, 30–49 incerto, &lt;30 asciuga in casa.</p>
     </details>
   </main>
 

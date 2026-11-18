@@ -29,6 +29,9 @@ const store = {
 };
 
 let loc = store.get(LS_LOC) || DEFAULT_LOC;
+const LS_LOAD = 'bucato.load';
+let loadType = store.get(LS_LOAD) || 'misto';
+let lastRender = null; // re-render without refetching when the load type changes
 
 // ---------------- fetching ----------------
 async function getJSON(url) {
@@ -57,6 +60,14 @@ function fetchEnsemble({ lat, lon }) {
     models: Core.ENS_MODELS.join(','), forecast_days: 6, timezone: Core.TZ,
   });
   return getJSON(`${OM_ENS}?${q}`);
+}
+// Same models, forecast issued 24 h earlier for the same hours → run-to-run stability (D0–D2).
+function fetchPrevious({ lat, lon }) {
+  const q = new URLSearchParams({
+    latitude: lat, longitude: lon, hourly: 'precipitation_previous_day1',
+    models: Core.PREV_MODELS.join(','), forecast_days: 3, timezone: Core.TZ,
+  });
+  return getJSON(`https://previous-runs-api.open-meteo.com/v1/forecast?${q}`);
 }
 function fetchSun({ lat, lon }) {
   const q = new URLSearchParams({ latitude: lat, longitude: lon, daily: 'sunrise,sunset', forecast_days: 6, timezone: Core.TZ });
@@ -99,7 +110,8 @@ function italianDateToYMD(s) {
 }
 
 async function fetchArpav(zoneId) {
-  const [widget, utenti] = await Promise.allSettled([getXML(ARPAV_XML + 'bollettino_widget.xml'), getXML(ARPAV_XML + 'bollettino_utenti.xml')]);
+  const [widget, utenti, bot] = await Promise.allSettled([getXML(ARPAV_XML + 'bollettino_widget.xml'),
+    getXML(ARPAV_XML + 'bollettino_utenti.xml'), getXML(ARPAV_XML + 'bollettino_bot.xml')]);
   if (widget.status !== 'fulfilled') throw widget.reason;
   const w = widget.value;
   const bul = w.querySelector('bulletin');
@@ -115,6 +127,19 @@ async function fetchArpav(zoneId) {
       rainPerc: parseInt(rain?.getAttribute('perc') || '0', 10) || 0, rain: rain?.textContent.trim() || '',
     };
   }) : [];
+
+  // forecaster's reliability ("attendibilità") for each slot of this zone
+  if (bot.status === 'fulfilled') {
+    const mz = bot.value.querySelector(`meteogramma[zoneid="${zoneId}"]`);
+    for (const sc of mz ? mz.querySelectorAll('scadenza') : []) {
+      const lab = sc.getAttribute('data') || '';
+      const date = italianDateToYMD(lab);
+      const time = /notte|mattin/i.test(lab) ? 'am' : /pomerig|sera/i.test(lab) ? 'pm' : 'all';
+      const att = sc.querySelector('ATTENDIBILITA')?.textContent.trim();
+      const e = days.find(x => x.date === date && x.time === time);
+      if (e && att) e.att = att;
+    }
+  }
 
   let text = null;
   if (utenti.status === 'fulfilled') {
@@ -153,8 +178,8 @@ async function load() {
   renderHeader(zone, inVeneto);
   setStatus('Caricamento previsioni…');
 
-  const [det, ens, sun, arp] = await Promise.allSettled([
-    fetchDeterministic(loc), fetchEnsemble(loc), fetchSun(loc), inVeneto ? fetchArpav(zone.id) : Promise.reject(new Error('Fuori dal Veneto')),
+  const [det, ens, sun, arp, prev] = await Promise.allSettled([
+    fetchDeterministic(loc), fetchEnsemble(loc), fetchSun(loc), inVeneto ? fetchArpav(zone.id) : Promise.reject(new Error('Fuori dal Veneto')), fetchPrevious(loc),
   ]);
   const ok = r => (r.status === 'fulfilled' ? r.value : null);
   if (!ok(det) && !ok(ens)) {
@@ -165,7 +190,7 @@ async function load() {
     }
     return setStatus('Impossibile caricare le previsioni. Controlla la connessione e riprova.', true);
   }
-  const raw = { det: ok(det), ens: ok(ens), sun: ok(sun), arpav: ok(arp) };
+  const raw = { det: ok(det), ens: ok(ens), sun: ok(sun), arpav: ok(arp), prev: ok(prev) };
   store.set(LS_CACHE, { at: Date.now(), locName: loc.name, raw });
   const warn = [];
   if (!raw.arpav && inVeneto) warn.push('bollettino ARPAV non disponibile');
@@ -175,9 +200,12 @@ async function load() {
 }
 
 function render(raw, zone, inVeneto) {
+  lastRender = [raw, zone, inVeneto];
   const det = raw.det ? Core.parseDeterministic(raw.det) : null;
   const ens = raw.ens ? Core.parseEnsemble(raw.ens) : null;
-  const res = Core.analyse({ det, ens, sun: raw.sun, arpav: raw.arpav });
+  const prev = raw.prev ? Core.parsePrevious(raw.prev) : null;
+  const res = Core.analyse({ det, ens, prev, sun: raw.sun, arpav: raw.arpav, load: loadType });
+  renderLoadPicker();
   renderDayBar(res);
   renderHero(res);
   renderDays(res, raw.arpav);
@@ -267,7 +295,8 @@ function renderDays({ days, best }) {
             el('div', {},
               el('div', { class: 'slot-t' }, e.time === 'am' ? 'Mattina' : e.time === 'pm' ? 'Pomeriggio' : 'Giornata'),
               el('div', { class: 'slot-s' }, e.sky),
-              el('div', { class: 'slot-r' }, `Pioggia ${e.rainPerc}%`, e.tmax && !e.tLabel ? ` · ${e.tmin ? e.tmin + '…' : ''}${e.tmax}°` : '')))),
+              el('div', { class: 'slot-r' }, `Pioggia ${e.rainPerc}%`, e.tmax && !e.tLabel ? ` · ${e.tmin ? e.tmin + '…' : ''}${e.tmax}°` : ''),
+              e.att ? el('div', { class: 'slot-a' }, `attendibilità ${e.att.toLowerCase()}`) : null))),
         ));
       } else {
         card.append(el('div', { class: 'arpav none' }, el('span', { class: 'src' }, 'ARPAV'), 'Bollettino ufficiale non ancora disponibile per questo giorno'));
@@ -275,7 +304,7 @@ function renderDays({ days, best }) {
 
       // metrics
       card.append(el('dl', { class: 'metrics' },
-        metric('Prob. pioggia', pct(day.P), 'ARPAV + ensemble + modelli'),
+        metric('Prob. pioggia', pct(day.P), day.shares ? sharesText(day.shares) : '–'),
         metric('Temperatura', day.tMax != null ? `${Math.round(day.tMin)}–${Math.round(day.tMax)}°` : '–', 'min–max nella finestra'),
         metric('Modelli con pioggia', day.Pdet != null ? pct(day.Pdet) : '–', `${day.perModel.length} modelli`),
         metric('Asciugatura', day.dryAt ? `entro le ${fmtH(day.dryAt)}` : `${Math.round(day.dryFrac * 100)}%`, `finestra ${fmtH(day.start)}–${fmtH(day.end)}`),
@@ -285,14 +314,14 @@ function renderDays({ days, best }) {
 
       card.append(ensembleBox(day));
       card.append(hourStrip(day));
-      if (day.conf) card.append(el('div', { class: 'conf' }, `Affidabilità: ${day.conf}`, day.fogArpav ? ' · prevista nebbia/nubi basse' : ''));
+      if (day.conf) card.append(confLine(day));
 
       // details per model
       const tbl = el('table', { class: 'models' },
-        el('thead', {}, el('tr', {}, el('th', {}, 'Modello'), el('th', {}, 'Pioggia (mm)'), el('th', {}, 'Asciugatura'), el('th', {}, 'Raffica max'))),
-        el('tbody', {}, day.perModel.map(m => el('tr', {},
-          el('td', {}, m.name), el('td', {}, m.rainSum.toFixed(1)),
-          el('td', {}, `${Math.round(Math.min(1, m.cum / Core.DRY_TARGET) * 100)}%`),
+        el('thead', {}, el('tr', {}, el('th', {}, 'Modello'), el('th', {}, 'Ris.'), el('th', {}, 'Peso'), el('th', {}, 'Pioggia (mm)'), el('th', {}, 'Asciug.'), el('th', {}, 'Raffica'))),
+        el('tbody', {}, [...day.perModel].sort((a, b) => b.w - a.w).map(m => el('tr', {},
+          el('td', {}, m.name), el('td', {}, m.res), el('td', {}, m.w.toFixed(1).replace('.', ',')), el('td', {}, m.rainSum.toFixed(1)),
+          el('td', {}, `${Math.round(Math.min(1, m.cum / day.target) * 100)}%`),
           el('td', {}, `${Math.round(m.gustMax)} km/h`)))));
       card.append(el('details', {}, el('summary', {}, 'Dettaglio modello per modello'), el('div', { class: 'tbl-wrap' }, tbl)));
     }
@@ -402,13 +431,14 @@ function ensembleBox(day) {
     : day.nWet === day.nMem ? `Tutti i ${day.nMem} scenari prevedono pioggia`
     : `${day.nWet} scenari su ${day.nMem} prevedono pioggia`;
   box.append(el('div', { class: 'ens-head' },
-    el('div', {}, el('div', { class: 'ens-kicker' }, 'ENSEMBLE · SCENARI POSSIBILI'), el('b', {}, head)),
+    el('div', {}, el('div', { class: 'ens-kicker' }, 'ENSEMBLE · SCENARI POSSIBILI'), el('b', {}, head),
+      el('div', { class: 'ens-sub' }, 'probabilità pesata per affidabilità del sistema a questa scadenza')),
     el('span', { class: `ens-pct ${day.Pens >= 0.5 ? 'hi' : day.Pens >= 0.2 ? 'mid' : 'lo'}` }, pct(day.Pens))));
   for (const src of day.ensBy) {
     const dots = el('div', { class: 'dots', 'aria-hidden': 'true' });
     for (let i = 0; i < src.n; i++) dots.append(el('i', { class: i < src.wet ? 'wet' : '' }));
     box.append(el('div', { class: 'ens-row' },
-      el('span', { class: 'ens-src' }, src.name, el('small', {}, `${src.wet}/${src.n}`)), dots));
+      el('span', { class: 'ens-src' }, src.name, el('small', {}, `${src.wet}/${src.n} · peso ${Math.round(src.wn * 100)}%`)), dots));
   }
   let amount = '';
   if (day.wetMeanMm != null) {
@@ -420,10 +450,43 @@ function ensembleBox(day) {
     el('span', { class: 'legend-dot wet' }), 'pioggia mentre il bucato è steso  ',
     el('span', { class: 'legend-dot' }), 'asciutto.', amount));
   box.append(el('details', { class: 'ens-why' }, el('summary', {}, 'Cos’è un ensemble?'),
-    el('p', {}, 'Invece di una sola previsione, ECMWF e il servizio meteo tedesco (ICON-EU) fanno girare lo stesso modello decine di volte, ' +
+    el('p', {}, 'Invece di una sola previsione, i centri meteo fanno girare lo stesso modello decine di volte, ' +
       'ogni volta con condizioni iniziali leggermente diverse, per tener conto dell’incertezza. Ogni pallino è uno di questi scenari: ' +
-      'la quota di pallini blu è la probabilità che piova (≥0,3 mm) durante la finestra di stesura.')));
+      'blu se piove (≥0,3 mm) durante la finestra di stesura.'),
+    el('p', {}, 'Per oggi e domani pesano di più gli ensemble ad alta risoluzione (ICON-D2 del servizio tedesco, ICON-CH1/CH2 di MeteoSvizzera, 1–2 km), ' +
+      'che descrivono meglio rilievi, nebbie e rovesci locali; dal terzo giorno pesa di più l’ensemble ECMWF, il più affidabile a medio termine. ' +
+      'La percentuale è la media pesata delle probabilità dei singoli sistemi.')));
   return box;
+}
+
+function sharesText(sh) {
+  const p = [];
+  if (sh.arpav) p.push(`ARPAV ${Math.round(sh.arpav * 100)}%`);
+  if (sh.ens) p.push(`ens. ${Math.round(sh.ens * 100)}%`);
+  if (sh.det) p.push(`modelli ${Math.round(sh.det * 100)}%`);
+  return p.join(' · ');
+}
+
+function confLine(day) {
+  const notes = [...(day.confNotes || [])];
+  if (day.lamShare > 0.5 && day.d <= 1) notes.push('modelli ad alta risoluzione');
+  if (day.fogArpav) notes.push('prevista nebbia/nubi basse');
+  const line = el('div', { class: `conf c-${day.conf}` }, el('b', {}, `Affidabilità ${day.conf}`), notes.length ? ` · ${notes.join(' · ')}` : '');
+  if (day.jump != null && day.jump >= 0.2) {
+    line.append(el('div', { class: 'conf-jump' },
+      `Ieri i modelli davano pioggia nel ${pct(day.PdetPrev)} dei casi, oggi nel ${pct(day.Pdet)}: previsione in evoluzione, ricontrolla più tardi.`));
+  }
+  return line;
+}
+
+// Load type selector (changes the amount of water to evaporate)
+function renderLoadPicker() {
+  const box = $('#load'); if (!box) return;
+  box.replaceChildren(el('span', { class: 'load-l' }, 'Bucato:'),
+    ...Object.entries(Core.LOADS).map(([k, v]) => el('button', {
+      type: 'button', class: k === loadType ? 'on' : '', 'aria-pressed': String(k === loadType), title: v.desc,
+      onclick: () => { loadType = k; store.set(LS_LOAD, k); if (lastRender) render(...lastRender); },
+    }, v.label)));
 }
 
 // ---------------- location UI ----------------

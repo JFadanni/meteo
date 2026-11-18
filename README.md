@@ -2,11 +2,14 @@
 
 A Progressive Web App that recommends the best day in the next 5 days to dry laundry outdoors. It combines:
 
-- **ARPAV** (official Veneto forecast): zone meteograms (`bollettino_widget.xml`) and bulletin text (`bollettino_utenti.xml`), open data under CC BY 4.0
-- **Open-Meteo multimodel**: ItaliaMeteo ICON-2I, ECMWF IFS, DWD ICON, Météo-France, UK Met Office, NOAA GFS
-- **Open-Meteo ensembles**: ECMWF ENS (51 members) and ICON-EU EPS (40 members), used for rain probability
+- **ARPAV** (official Veneto forecast): zone meteograms (`bollettino_widget.xml`), the forecaster's reliability for each slot (`bollettino_bot.xml`) and the bulletin text (`bollettino_utenti.xml`). Open data under CC BY 4.0.
+- **11 deterministic models** via Open-Meteo, weighted by lead time:
+  - Kilometre-scale limited-area models, which carry most of the weight today and tomorrow: MeteoSwiss ICON-CH1 (1 km) and ICON-CH2 (2.1 km), ItaliaMeteo ICON-2I (2.2 km), DWD ICON-D2 (2.2 km), Météo-France AROME (2.5 km).
+  - Global models, which carry most of the weight from day 3: ECMWF IFS HRES (9 km), ECMWF AIFS (AI model), ICON-EU, ARPEGE, UK Met Office, GFS.
+- **5 ensemble systems, 143 members in total**: ICON-D2-EPS (20), ICON-CH1-EPS (11), ICON-CH2-EPS (21), ECMWF ENS (51), ICON-EU-EPS (40). The rain probability is computed for each system, then blended with lead-dependent weights.
+- **Run-to-run consistency** via the Open-Meteo previous-runs API: today's forecast for D0–D2 is compared with the one issued 24 h earlier.
 
-All three sources send `Access-Control-Allow-Origin: *`, so the app is fully static. It needs no server, API key or build step.
+All of these sources send `Access-Control-Allow-Origin: *`, so the app is fully static.
 
 ## Run it on Android
 
@@ -35,22 +38,26 @@ Open `http://localhost:8080` in Firefox and install it as above. `localhost` cou
 > Opening `index.html` directly as a `file://` URL also shows forecasts, but GPS and offline install won't work.
 
 ## How the score works
-- **Drying window:** from about 1.5 h after sunrise (dew gone) to just before sunset. For today, it starts from the current hour.
-- **Drying rate:** a Penman-type evaporation for a wet, hanging cloth, `E = W·Rn/λ + (1−W)·0.26(1+0.54u)·VPD`. It uses each model's temperature, VPD, wind (reduced to about 1.5 m height) and shortwave radiation, and is averaged across models with weights (ICON-2I 1.3, ECMWF 1.2, GFS 0.8, the others 1.0). A load counts as dry after about **1 mm** of evaporation (`DRY_TARGET` in `core.js`, an empirical value you can tune).
-- **Rain chance:** the probability of ≥ 0.3 mm in the window, blended **40% ARPAV + 40% ensemble + 20% deterministic models**. ARPAV's "notte/mattina" slot is down-weighted (×0.8) because it includes the night. After the end of the ARPAV bulletin, only the models are used.
-- **Score:** `100 × dryFraction^0.8 × (1 − P)^1.3`, multiplied by 0.8 for gusts over 60 km/h and by 0.85 for fog or low stratus (from the ARPAV sky text, or mean RH above 92%).
-  - ≥ 70 and fully dry: *great*
-  - ≥ 50: *good*. Shown as *"finish indoors"* if the load won't fully dry.
-  - 30–49: *iffy*
-  - < 30: *dry indoors*
+- **Drying window:** from about 1.5 h after sunrise to just before sunset. For today, it starts from the current hour.
+- **Drying rate:** the Penman combination equation for a saturated surface, written per m² of fabric with both faces evaporating: `λE = (Δ·Rn + 2·h_c·VPD)/(Δ+γ)`, multiplied by an efficiency η = 0.7 for crowding on the line.
+  - *Wind:* `h_c = 2.8 + 3.0·u` W m⁻² K⁻¹ (Watmuff et al. 1977), with `u = 0.6·u10` (log profile, z0 ≈ 0.1 m) and a minimum of 0.3 m/s for free convection.
+  - *Sun:* shortwave on a vertical sheet of random orientation is `DNI·cos(elev)·2/π + DIF + 0.2·GHI`, absorbed with a = 0.6. The sun elevation is derived from `(GHI−DIF)/DNI`. Low winter sun hits vertical laundry better than a horizontal surface; high summer sun hits it less.
+  - *Longwave:* `0.95σT⁴(ε_sky−1)`, with `ε_sky = c + (1−c)·1.24(e_a/T)^(1/7)` (Brutsaert 1975, with cloud fraction c).
+  - *Humidity:* enters through VPD. In addition, the last 25% of the water is in the hygroscopic (falling-rate) stage, where the rate is multiplied by `clamp((100−RH)/35, 0.1, 1)`.
+- **Water to remove:** depends on the load type, per m² of fabric after the spin cycle: light 0.3, mixed 0.5, heavy 0.8 kg/m².
+- **Rain chance:** the probability of ≥ 0.3 mm in the window.
+  - The blend gives ARPAV a weight of 0.55, 0.45, 0.35 or 0.25 according to its *attendibilità* (ottima, buona, discreta, scarsa), plus 0.4 for the ensembles and 0.2 for the share of deterministic models showing rain.
+  - Ensemble weights by lead time:
+    - Today and tomorrow: D2 0.30, CH1 0.25, CH2 0.20, ECMWF 0.15, ICON-EU 0.10.
+    - From day 3: ECMWF 0.50, CH2 0.25, ICON-EU 0.25.
+- **Score:** `100 × dryFraction^0.8 × (1 − P)^1.3`, multiplied by 0.8 for gusts over 60 km/h and by 0.85 for fog or low stratus.
+- **Confidence:** depends on how certain the rain signal is, the spread between models' drying estimates, the lead time, the forecast's change since 24 h earlier, and ARPAV's reliability.
 - **Best day:** the highest score. An earlier day wins if two days are within 3 points.
-
-The location is matched to the nearest of the 18 ARPAV zones. You can override the zone in the 📍 panel. Locations outside Veneto use the models only.
 
 ## Files
 | File | Purpose |
 |---|---|
-| `core.js` | All meteorology and scoring (pure functions, no DOM) |
+| `core.js` | All meteorology and scoring: sources and weights, drying physics, blending (pure functions, no DOM) |
 | `app.js` | Data fetching, ARPAV XML parsing, UI |
 | `index.html`, `style.css` | Page (mobile-first, light and dark mode) |
 | `manifest.webmanifest`, `sw.js`, `icons/` | PWA install and offline shell |

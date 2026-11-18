@@ -190,3 +190,19 @@ table.models { width: 100%; border-collapse: collapse; font-size: 13px; margin-t
 .ab-sec dt { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .ab-ico { margin-right: 6px; }
 .ab-sec dd { margin: 2px 0 0; font-size: 14px; line-height: 1.5; }
+
+/* ---------- review additions ---------- */
+.load { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.load-l { font-size: 13px; color: var(--muted); margin-right: 2px; }
+.load button { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--card);
+  color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
+.load button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+.slot-a { font-size: 11px; color: var(--c-great); font-weight: 600; }
+.ens-sub { font-size: 11px; color: var(--muted); }
+.ens-row { grid-template-columns: 92px 1fr; }
+.conf b { font-weight: 700; }
+.conf.c-alta b { color: var(--c-great); } .conf.c-media b { color: var(--c-iffy); } .conf.c-bassa b { color: var(--c-bad); }
+.conf-jump { margin-top: 4px; padding: 6px 8px; border-radius: 8px; color: var(--fg);
+  background: color-mix(in srgb, var(--c-iffy) 12%, transparent); }
+.method h4 { font-size: 13px; margin: 12px 0 2px; }
+.method ul { font-size: 13px; color: var(--muted); padding-left: 18px; }

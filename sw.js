@@ -1,6 +1,6 @@
 // Service worker: cache the app shell so it opens offline; forecasts are always fetched live
 // (the app keeps the last forecast in localStorage as an offline fallback).
-const CACHE = 'bucato-v3';
+const CACHE = 'bucato-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png'];
 

@@ -4,26 +4,63 @@
 
 const Core = (() => {
   const TZ = 'Europe/Rome';
-
-  // Deterministic models requested from Open-Meteo, with blending weights.
-  // ICON-2I (ItaliaMeteo/ARPAE, 2.2 km) resolves Alps/Prealps/Po valley best at short range.
-  const MODELS = [
-    { id: 'italia_meteo_arpae_icon_2i', name: 'ItaliaMeteo ICON-2I', w: 1.3 },
-    { id: 'ecmwf_ifs025',               name: 'ECMWF IFS',           w: 1.2 },
-    { id: 'icon_seamless',              name: 'DWD ICON',            w: 1.0 },
-    { id: 'meteofrance_seamless',       name: 'Météo-France',        w: 1.0 },
-    { id: 'ukmo_seamless',              name: 'UK Met Office',       w: 1.0 },
-    { id: 'gfs_seamless',               name: 'NOAA GFS',            w: 0.8 },
-  ];
-  const ENS_MODELS = ['ecmwf_ifs025', 'icon_eu']; // 51 + 40 members
-  const HOURLY_VARS = ['temperature_2m', 'relative_humidity_2m', 'vapour_pressure_deficit',
-    'precipitation', 'wind_speed_10m', 'wind_gusts_10m', 'shortwave_radiation', 'cloud_cover'];
-
-  // Thresholds
-  const RAIN_DAY_MM = 0.3;   // rain in the drying window that ruins it (sum, mm)
-  const RAIN_HOUR_MM = 0.1;  // hourly "wet" threshold for the hourly strip
-  const DRY_TARGET = 1.0;    // mm-equivalent evaporation to dry a typical cotton load (empirical)
   const DAYS = 5;
+
+  // ---------------------------------------------------------------------------
+  // SOURCES
+  // Deterministic models. `w` = blending weight by lead day [oggi, +1, +2, +3, +4].
+  // At D0–D1 the kilometre-scale limited-area models (LAM) dominate: they resolve the
+  // Prealps/Euganei orography, Po-valley fog/low stratus, sea breeze and convection far
+  // better than global models. From D+2 their advantage fades (and most stop) and the
+  // ECMWF HRES/AIFS global forecasts become the reference.
+  const MODELS = [
+    { id: 'meteoswiss_icon_ch1',        name: 'MeteoSwiss ICON-CH1', res: '1 km',   w: [1.5, 1.5, 1.0, 1.0, 1.0] },
+    { id: 'italia_meteo_arpae_icon_2i', name: 'ItaliaMeteo ICON-2I', res: '2,2 km', w: [1.5, 1.5, 1.2, 1.0, 1.0] },
+    { id: 'icon_d2',                    name: 'DWD ICON-D2',         res: '2,2 km', w: [1.3, 1.3, 1.0, 1.0, 1.0] },
+    { id: 'meteoswiss_icon_ch2',        name: 'MeteoSwiss ICON-CH2', res: '2,1 km', w: [1.3, 1.3, 1.0, 0.9, 0.9] },
+    { id: 'meteofrance_arome_france',   name: 'Météo-France AROME',  res: '2,5 km', w: [1.2, 1.2, 1.0, 1.0, 1.0] },
+    { id: 'ecmwf_ifs',                  name: 'ECMWF IFS HRES',      res: '9 km',   w: [1.2, 1.2, 1.5, 1.5, 1.5] },
+    { id: 'ecmwf_aifs025_single',       name: 'ECMWF AIFS (IA)',     res: '28 km',  w: [0.6, 0.6, 1.0, 1.2, 1.2] },
+    { id: 'icon_eu',                    name: 'DWD ICON-EU',         res: '7 km',   w: [0.8, 0.8, 1.0, 1.0, 1.0] },
+    { id: 'meteofrance_arpege_europe',  name: 'Météo-France ARPEGE', res: '11 km',  w: [0.6, 0.6, 0.8, 0.8, 0.8] },
+    { id: 'ukmo_seamless',              name: 'UK Met Office',       res: '10 km',  w: [0.7, 0.7, 1.0, 1.0, 1.0] },
+    { id: 'gfs_seamless',               name: 'NOAA GFS',            res: '13 km',  w: [0.4, 0.4, 0.6, 0.7, 0.7] },
+  ];
+  // Models also queried 24 h earlier (Open-Meteo previous-runs) to measure run-to-run stability.
+  const PREV_MODELS = ['italia_meteo_arpae_icon_2i', 'icon_d2', 'meteoswiss_icon_ch2', 'meteofrance_arome_france', 'ecmwf_ifs'];
+
+  // Ensembles. Probabilities are computed per system and then blended with lead-dependent
+  // weights (pooling members would let the biggest ensemble dominate regardless of skill).
+  const ENSEMBLES = [
+    { id: 'icon_d2',             name: 'ICON-D2-EPS',  w: [0.30, 0.30, 0.25, 0.25, 0.25] },
+    { id: 'meteoswiss_icon_ch1', name: 'ICON-CH1-EPS', w: [0.25, 0.25, 0.20, 0.20, 0.20] },
+    { id: 'meteoswiss_icon_ch2', name: 'ICON-CH2-EPS', w: [0.20, 0.20, 0.25, 0.25, 0.25] },
+    { id: 'ecmwf_ifs025',        name: 'ECMWF ENS',    w: [0.15, 0.15, 0.50, 0.50, 0.50] },
+    { id: 'icon_eu',             name: 'ICON-EU-EPS',  w: [0.10, 0.10, 0.25, 0.25, 0.25] },
+  ];
+  const ENS_MODELS = ENSEMBLES.map(e => e.id);
+
+  const HOURLY_VARS = ['temperature_2m', 'relative_humidity_2m', 'vapour_pressure_deficit',
+    'precipitation', 'wind_speed_10m', 'wind_gusts_10m', 'shortwave_radiation',
+    'direct_normal_irradiance', 'diffuse_radiation', 'cloud_cover'];
+
+  // ARPAV weight in the rain blend, from the forecaster's own reliability ("attendibilità").
+  const ARPAV_W = { ottima: 0.55, buona: 0.45, discreta: 0.35, sufficiente: 0.30, scarsa: 0.25, bassa: 0.25 };
+  const ENS_W = 0.4, DET_W = 0.2;
+
+  // ---------------------------------------------------------------------------
+  // THRESHOLDS AND LAUNDRY
+  const RAIN_DAY_MM = 0.3;   // rain in the drying window that re-wets the laundry (sum, mm)
+  const RAIN_HOUR_MM = 0.1;  // hourly "wet" threshold for the hourly strip
+  // Water to evaporate per m² of exposed fabric after a 1000–1200 rpm spin, items hung
+  // single or folded over the line (kg/m² = mm).
+  const LOADS = {
+    leggero: { label: 'Leggero', desc: 'magliette, camicie, intimo', target: 0.3 },
+    misto:   { label: 'Misto',   desc: 'carico tipico',              target: 0.5 },
+    pesante: { label: 'Pesante', desc: 'asciugamani, jeans, lenzuola', target: 0.8 },
+  };
+  const DRY_TARGET = LOADS.misto.target;
+  const HYGRO_START = 0.75;  // fraction of water after which cotton enters the hygroscopic (falling-rate) stage
 
   // ARPAV forecast zones: approximate centroids used to pick the nearest zone.
   const ZONES = [
@@ -73,25 +110,68 @@ const Core = (() => {
   }
   const hourOf = iso => { const [h, m] = iso.slice(11, 16).split(':').map(Number); return h + m / 60; };
 
-  // ---- physics ----
-  // Penman-type evaporation from a wet, hanging textile (mm/h equivalent).
-  // E = W·Rn/λ + (1−W)·Ea, W = Δ/(Δ+γ), Ea = 0.26(1+0.54u)·VPD[hPa] per day (Penman 1948 wind function).
-  function dryingRate(T, RH, vpdKPa, windKmh, sw) {
-    if (T == null || (RH == null && vpdKPa == null)) return null;
-    const es = 0.6108 * Math.exp(17.27 * T / (T + 237.3));        // kPa
-    const vpd = vpdKPa != null ? vpdKPa : Math.max(0, es * (1 - RH / 100));
-    const delta = 4098 * es / (T + 237.3) ** 2;                      // kPa/K
+  // ---------------------------------------------------------------------------
+  // PHYSICS — evaporation from wet fabric hanging vertically on a line.
+  //
+  // Penman combination equation for a saturated surface (no surface resistance),
+  // written per m² of fabric with BOTH faces evaporating:
+  //     λE = [ Δ·Rn + 2·h_c·VPD ] / (Δ + γ)
+  //   Δ   slope of the saturation curve (kPa/K), γ psychrometric constant 0.066 kPa/K
+  //   h_c convective heat-transfer coefficient per face, Watmuff et al. (1977):
+  //       h_c = 2.8 + 3.0·u  (W m⁻² K⁻¹), u wind at line height (~1.5 m)
+  //       u = 0.6·u10 (log profile, z0 ≈ 0.1 m: suburban garden/balcony), min 0.3 m/s (free convection)
+  //   Rn  net radiation absorbed by the fabric (both faces):
+  //       shortwave on a vertical sheet of random orientation:
+  //         direct  = DNI·cos(elev)·2/π   (mean |cos azimuth| = 2/π; low winter sun favours vertical cloth)
+  //         diffuse = DIF                 (each face sees half the sky)
+  //         ground-reflected = 0.2·GHI
+  //       absorbed with a_s = 0.6 (wet, mixed-colour fabric);
+  //       longwave: each face sees half sky / half surroundings at air temperature:
+  //         LWnet = 0.95·σT⁴·(ε_sky − 1), ε_sky = c + (1−c)·1.24·(e_a/T)^(1/7) (Brutsaert 1975, cloud c)
+  //   η = 0.7 efficiency for crowding/shading between items on the line.
+  // Returns mm/h (= kg m⁻² h⁻¹ of fabric).
+  const SIGMA = 5.67e-8, ETA = 0.7, ABS_SW = 0.6, GROUND_ALB = 0.2;
+  function dryingRate(o) {
+    const { T, RH } = o;
+    if (T == null || RH == null) return null;
+    const es = 0.6108 * Math.exp(17.27 * T / (T + 237.3));          // kPa
+    const vpd = o.vpd != null ? o.vpd : Math.max(0, es * (1 - RH / 100));
+    const delta = 4098 * es / (T + 237.3) ** 2;                        // kPa/K
     const gamma = 0.066;
-    const W = delta / (delta + gamma);
-    const u = Math.min((windKmh ?? 5) / 3.6, 8) * 0.75;               // 10 m → ~1.5 m height
-    const Ea = 0.26 * (1 + 0.54 * u) * (vpd * 10) / 24;              // mm/h
-    const Er = 0.5 * Math.max(0, sw ?? 0) / 681;                     // vertical cloth intercepts ~half; 681 W/m² = 1 mm/h
-    let E = W * Er + (1 - W) * Ea;
-    if (T < 0) E *= 0.5;                                              // freezing: slow sublimation
-    return Math.max(0, E);
-  }
+    const u = Math.max(0.3, ((o.wind ?? 5) / 3.6) * 0.6);
+    const hc = 2.8 + 3.0 * Math.min(u, 10);
 
-  // ---- parsing Open-Meteo ----
+    // shortwave on the cloth
+    const ghi = Math.max(0, o.ghi ?? 0);
+    let sw;
+    if (o.dni != null && o.dif != null) {
+      const dni = Math.max(0, o.dni), dif = Math.max(0, o.dif);
+      let sinEl = dni > 20 ? (ghi - dif) / dni : 0;
+      sinEl = Math.min(1, Math.max(0, sinEl));
+      const direct = dni > 20 ? dni * Math.sqrt(1 - sinEl * sinEl) * (2 / Math.PI) : 0;
+      sw = direct + dif + GROUND_ALB * ghi;
+    } else {
+      sw = 1.1 * ghi;                                                   // fallback: typical cloth/horizontal ratio
+    }
+    // longwave
+    const TK = T + 273.15, ea = es * RH / 100 * 10;                    // hPa
+    const c = Math.min(1, Math.max(0, (o.cc ?? 50) / 100));
+    const epsSky = c + (1 - c) * 1.24 * Math.pow(ea / TK, 1 / 7);
+    const lw = 0.95 * SIGMA * TK ** 4 * (epsSky - 1);
+    const Rn = ABS_SW * sw + lw;
+
+    const lambda = 2.501e6 - 2361 * T;                                  // J/kg
+    const LE = (delta * Rn + 2 * hc * vpd) / (delta + gamma);           // W/m²
+    let E = Math.max(0, LE) / lambda * 3600 * ETA;
+    if (T < 0) E *= 0.5;                                                // frozen fabric: slow sublimation
+    return E;
+  }
+  // Hygroscopic stage: the last ~25% of water is bound in the cotton fibres; its vapour pressure
+  // falls below saturation (sorption isotherm), so drying slows strongly in humid air.
+  const hygroFactor = rh => Math.min(1, Math.max(0.1, (100 - (rh ?? 70)) / 35));
+
+  // ---------------------------------------------------------------------------
+  // PARSING Open-Meteo
   function indexByTime(times) { const m = new Map(); times.forEach((t, i) => m.set(t, i)); return m; }
 
   function parseDeterministic(json) {
@@ -100,21 +180,28 @@ const Core = (() => {
       const s = {};
       for (const v of HOURLY_VARS) s[v] = h[`${v}_${m.id}`] || null;
       return { ...m, s };
-    }).filter(m => m.s.precipitation);
+    }).filter(m => m.s.precipitation && m.s.precipitation.some(v => v != null));
     return { time: h.time, idx, models };
   }
 
-  const ENS_NAMES = { ecmwf_ifs025: 'ECMWF', icon_eu: 'ICON-EU' };
   function parseEnsemble(json) {
     const h = json.hourly, idx = indexByTime(h.time);
+    // longest id first so "meteoswiss_icon_ch1" is not mistaken for another system
+    const ids = [...ENS_MODELS].sort((a, b) => b.length - a.length);
     const members = Object.keys(h).filter(k => k.startsWith('precipitation')).map(k => {
-      const src = ENS_MODELS.find(id => k.includes(id)) || 'other';
+      const src = ids.find(id => k.endsWith(id) || k.includes(`_${id}_`) || k.includes(`${id}_ensemble`) || k.includes(`${id}_eps`)) || 'other';
       return { src, data: h[k] };
     });
     return { time: h.time, idx, members };
   }
 
-  // ---- ARPAV rain probability for a date (from widget meteogram) ----
+  function parsePrevious(json) {
+    const h = json.hourly, idx = indexByTime(h.time);
+    const models = PREV_MODELS.map(id => ({ id, rain: h[`precipitation_previous_day1_${id}`] || null })).filter(m => m.rain);
+    return { idx, models };
+  }
+
+  // ---- ARPAV rain probability and reliability for a date ----
   function arpavRainProb(entries) {
     if (!entries || !entries.length) return null;
     const p = t => { const e = entries.find(x => x.time === t); return e ? e.rainPerc / 100 : null; };
@@ -124,11 +211,21 @@ const Core = (() => {
     const vals = [am != null ? 0.8 * am : null, pm].filter(v => v != null);
     return vals.length ? Math.max(...vals) : null;
   }
+  function arpavWeight(entries) {
+    const atts = (entries || []).map(e => (e.att || '').toLowerCase()).filter(Boolean);
+    if (!atts.length) return { w: 0.4, att: null };
+    // most conservative slot of the day
+    let worst = atts[0];
+    for (const a of atts) if ((ARPAV_W[a] ?? 0.4) < (ARPAV_W[worst] ?? 0.4)) worst = a;
+    return { w: ARPAV_W[worst] ?? 0.4, att: worst };
+  }
 
-  // ---- the main per-day analysis ----
-  function analyse({ det, ens, sun, arpav, now = new Date() }) {
+  // ---------------------------------------------------------------------------
+  // MAIN per-day analysis
+  function analyse({ det, ens, prev, sun, arpav, load = 'misto', now = new Date() }) {
     const today = todayYMD(now);
     const nowH = nowHourFloat(now);
+    const target = (LOADS[load] || LOADS.misto).target;
     const days = [];
 
     for (let d = 0; d < DAYS; d++) {
@@ -142,8 +239,7 @@ const Core = (() => {
       const end = Math.floor(sunset - 0.25);
       let lateToday = false;
       if (d === 0) { const s = Math.ceil(nowH); if (s > start) start = s; }
-      const nHours = end - start;
-      if (nHours < 3) lateToday = true;
+      if (end - start < 3) lateToday = true;
 
       // Hour intervals [H, H+1) are represented by Open-Meteo time H+1 (precip/radiation are
       // sums/means over the preceding hour).
@@ -158,8 +254,11 @@ const Core = (() => {
           for (const { key } of hours) {
             const i = det.idx.get(key);
             const g = v => (i != null && m.s[v] ? m.s[v][i] : null);
-            rates.push(dryingRate(g('temperature_2m'), g('relative_humidity_2m'), g('vapour_pressure_deficit'),
-              g('wind_speed_10m'), g('shortwave_radiation')));
+            rates.push(dryingRate({
+              T: g('temperature_2m'), RH: g('relative_humidity_2m'), vpd: g('vapour_pressure_deficit'),
+              wind: g('wind_speed_10m'), ghi: g('shortwave_radiation'), dni: g('direct_normal_irradiance'),
+              dif: g('diffuse_radiation'), cc: g('cloud_cover'),
+            }));
             rain.push(g('precipitation')); gust.push(g('wind_gusts_10m')); rh.push(g('relative_humidity_2m'));
             temp.push(g('temperature_2m'));
           }
@@ -168,70 +267,102 @@ const Core = (() => {
           if (valid < 0.8 * hours.length || validRain < 0.8 * hours.length) continue; // model doesn't cover this day
           const rainSum = rain.reduce((a, b) => a + (b || 0), 0);
           const cum = rates.reduce((a, b) => a + (b || 0), 0) * hours.length / valid;
+          const ts = temp.filter(x => x != null);
           perModel.push({
-            id: m.id, name: m.name, w: m.w, rates, rain, rainSum, cum,
+            id: m.id, name: m.name, res: m.res, w: m.w[Math.min(d, m.w.length - 1)], rates, rain, rh, rainSum, cum,
             gustMax: Math.max(...gust.filter(x => x != null), 0),
-            rhMean: avg(rh), tMax: Math.max(...temp.filter(x => x != null)), tMin: Math.min(...temp.filter(x => x != null)),
+            rhMean: avg(rh), tMax: Math.max(...ts), tMin: Math.min(...ts),
           });
         }
       }
       const W = perModel.reduce((a, m) => a + m.w, 0);
-      const wavg = f => W ? perModel.reduce((a, m) => a + m.w * f(m), 0) / W : null;
-
-      // mean hourly drying rate across models → time to dry
-      const meanRates = hours.map((_, k) => {
+      const wavg = f => (W ? perModel.reduce((a, m) => a + m.w * f(m), 0) / W : null);
+      const hourWavg = (k, f) => {
         let s = 0, ww = 0;
-        for (const m of perModel) if (m.rates[k] != null) { s += m.w * m.rates[k]; ww += m.w; }
+        for (const m of perModel) { const v = f(m, k); if (v != null) { s += m.w * v; ww += m.w; } }
         return ww ? s / ww : null;
-      });
+      };
+      const meanRates = hours.map((_, k) => hourWavg(k, (m, j) => m.rates[j]));
+      const meanRH = hours.map((_, k) => hourWavg(k, (m, j) => m.rh[j]));
+
+      // integrate drying with the hygroscopic slowdown (15-min steps)
       let cum = 0, dryAt = null;
-      meanRates.forEach((r, k) => {
-        if (dryAt != null || r == null) return;
-        if (cum + r >= DRY_TARGET) dryAt = hours[k].H + (DRY_TARGET - cum) / r;
-        cum += r;
+      hours.forEach(({ H }, k) => {
+        const r = meanRates[k]; if (r == null) return;
+        const f = hygroFactor(meanRH[k]);
+        for (let s = 0; s < 4; s++) {
+          const inc = (cum >= HYGRO_START * target ? r * f : r) / 4;
+          if (dryAt == null && inc > 0 && cum + inc >= target) dryAt = H + (s + (target - cum) / inc) / 4;
+          cum += inc;
+        }
       });
-      const cumE = meanRates.reduce((a, b) => a + (b || 0), 0);
+      const dryFrac = Math.min(1, cum / target);
+
       const Pdet = W ? wavg(m => (m.rainSum >= RAIN_DAY_MM ? 1 : 0)) : null;
       const rainMean = wavg(m => m.rainSum);
       const gust = wavg(m => m.gustMax);
       const rhMean = wavg(m => m.rhMean ?? 0);
       const cums = perModel.map(m => m.cum);
-      const spread = cums.length > 1 ? std(cums) / Math.max(avg(cums), 0.05) : null;
+      const spread = cums.length > 1 ? std(cums) / Math.max(avg(cums), 0.02) : null;
+      const lamShare = W ? perModel.filter(m => /icon_2i|icon_d2|icon_ch|arome/.test(m.id)).reduce((a, m) => a + m.w, 0) / W : 0;
 
-      // --- ensemble ---
-      // Each member is one plausible scenario; count those that are wet in the drying window.
+      // --- ensembles: probability per system, then lead-dependent blend ---
       let Pens = null, nMem = 0, nWet = 0, wetMeanMm = null, hourlyEns = hours.map(() => null);
       const ensBy = [];
       if (ens && hours.length) {
-        const hw = hours.map(() => [0, 0]), by = new Map(); let wetSum = 0;
+        const by = new Map(); let wetSum = 0;
         for (const mem of ens.members) {
           const vals = hours.map(({ key }) => { const i = ens.idx.get(key); return i == null ? null : mem.data[i]; });
           if (vals.some(v => v == null)) continue;           // member doesn't reach this day
           const sum = vals.reduce((a, b) => a + b, 0), wet = sum >= RAIN_DAY_MM;
-          vals.forEach((v, k) => { hw[k][1]++; if (v >= RAIN_HOUR_MM) hw[k][0]++; });
-          nMem++; if (wet) { nWet++; wetSum += sum; }
-          if (!by.has(mem.src)) by.set(mem.src, { name: ENS_NAMES[mem.src] || mem.src, n: 0, wet: 0 });
+          if (!by.has(mem.src)) by.set(mem.src, { id: mem.src, n: 0, wet: 0, hw: hours.map(() => 0) });
           const b = by.get(mem.src); b.n++; if (wet) b.wet++;
+          vals.forEach((v, k) => { if (v >= RAIN_HOUR_MM) b.hw[k]++; });
+          nMem++; if (wet) { nWet++; wetSum += sum; }
         }
-        if (nMem >= 10) {
-          Pens = nWet / nMem; hourlyEns = hw.map(([a, b]) => (b ? a / b : null));
+        let ws = 0, ps = 0; const hp = hours.map(() => 0);
+        for (const sys of ENSEMBLES) {
+          const b = by.get(sys.id);
+          if (!b || b.n < 5) continue;
+          const w = sys.w[Math.min(d, sys.w.length - 1)];
+          ensBy.push({ id: sys.id, name: sys.name, n: b.n, wet: b.wet, p: b.wet / b.n, w });
+          ws += w; ps += w * b.wet / b.n;
+          b.hw.forEach((c, k) => { hp[k] += w * c / b.n; });
+        }
+        if (ws > 0) {
+          Pens = ps / ws; hourlyEns = hp.map(v => v / ws);
           wetMeanMm = nWet ? wetSum / nWet : null;
-          ensBy.push(...by.values());
+          ensBy.forEach(e => { e.wn = e.w / ws; });
         }
+      }
+
+      // --- run-to-run consistency (forecast issued 24 h earlier for the same hours) ---
+      let PdetPrev = null, jump = null;
+      if (prev && d <= 2 && hours.length) {
+        let s = 0, ww = 0, sNow = 0;
+        for (const pm of prev.models) {
+          const now = perModel.find(m => m.id === pm.id); if (!now) continue;
+          const vals = hours.map(({ key }) => { const i = prev.idx.get(key); return i == null ? null : pm.rain[i]; });
+          if (vals.some(v => v == null)) continue;
+          const wetPrev = vals.reduce((a, b) => a + b, 0) >= RAIN_DAY_MM ? 1 : 0;
+          s += now.w * wetPrev; sNow += now.w * (now.rainSum >= RAIN_DAY_MM ? 1 : 0); ww += now.w;
+        }
+        if (ww > 0) { PdetPrev = s / ww; jump = Math.abs(sNow / ww - PdetPrev); }
       }
 
       // --- ARPAV ---
       const arpavDay = arpav ? arpav.days.filter(e => e.date === date) : [];
       const Parpav = arpavRainProb(arpavDay);
+      const { w: wArpav, att: arpavAtt } = arpavWeight(arpavDay);
       const fogArpav = arpavDay.some(e => /nebbi|nubi basse|foschi/i.test(e.sky));
 
       // --- blend rain probability ---
-      const parts = [[Parpav, 0.4], [Pens, 0.4], [Pdet, 0.2]].filter(([p]) => p != null);
+      const parts = [[Parpav, wArpav], [Pens, ENS_W], [Pdet, DET_W]].filter(([p]) => p != null);
       const wsum = parts.reduce((a, [, w]) => a + w, 0);
       const P = wsum ? parts.reduce((a, [p, w]) => a + p * w, 0) / wsum : null;
+      const shares = wsum ? { arpav: Parpav != null ? wArpav / wsum : 0, ens: Pens != null ? ENS_W / wsum : 0, det: Pdet != null ? DET_W / wsum : 0 } : null;
 
       // --- score ---
-      const dryFrac = Math.min(1, cumE / DRY_TARGET);
       let score = null;
       if (P != null && perModel.length && !lateToday) {
         let s = 100 * Math.pow(dryFrac, 0.8) * Math.pow(1 - P, 1.3);
@@ -240,15 +371,18 @@ const Core = (() => {
         score = Math.round(s);
       }
 
-      // confidence: agreement on rain (P near 0/1), model spread on drying, lead time
-      let conf = null;
+      // confidence: agreement on rain, model spread on drying, lead time, run-to-run jumps, ARPAV reliability
+      let conf = null, confNotes = [];
       if (score != null) {
         const rainAmb = 1 - Math.abs(2 * P - 1);           // 0 = sure, 1 = coin flip
-        const c = 1 - 0.5 * rainAmb - 0.3 * Math.min(1, spread ?? 0.5) - 0.05 * d;
+        let c = 1 - 0.5 * rainAmb - 0.3 * Math.min(1, spread ?? 0.5) - 0.05 * d;
+        if (jump != null) c -= 0.3 * jump;
+        if (arpavAtt && ARPAV_W[arpavAtt] <= 0.35) c -= 0.1;
         conf = c > 0.7 ? 'alta' : c > 0.45 ? 'media' : 'bassa';
+        if (jump != null) confNotes.push(jump < 0.2 ? 'stabile rispetto a ieri' : jump < 0.4 ? 'un po’ cambiata rispetto a ieri' : 'cambiata molto rispetto a ieri');
       }
 
-      // first likely-rain hour (ensemble ≥ 40%, else deterministic mean ≥ 0.1 mm)
+      // first likely-rain hour
       let rainFrom = null;
       const hourlyDet = hours.map((_, k) => (W ? wavg(m => ((m.rain[k] ?? 0) >= RAIN_HOUR_MM ? 1 : 0)) : null));
       const hourlyP = hours.map((_, k) => (hourlyEns[k] != null ? hourlyEns[k] : hourlyDet[k]));
@@ -257,10 +391,10 @@ const Core = (() => {
       });
 
       days.push({
-        date, d, start, end, sunrise, sunset, lateToday, hours, meanRates, hourlyP,
-        perModel, cumE, dryFrac, dryAt, Pdet, Pens, nMem, nWet, wetMeanMm, ensBy,
-        tMax: wavg(m => m.tMax), tMin: wavg(m => m.tMin), Parpav, P, rainMean, gust, rhMean,
-        spread, arpavDay, fogArpav, score, conf, rainFrom,
+        date, d, start, end, sunrise, sunset, lateToday, hours, meanRates, hourlyP, target,
+        perModel, cumE: cum, dryFrac, dryAt, Pdet, Pens, nMem, nWet, wetMeanMm, ensBy,
+        tMax: wavg(m => m.tMax), tMin: wavg(m => m.tMin), Parpav, arpavAtt, P, shares, rainMean, gust, rhMean,
+        spread, lamShare, PdetPrev, jump, arpavDay, fogArpav, score, conf, confNotes, rainFrom,
       });
     }
 
@@ -270,7 +404,7 @@ const Core = (() => {
       if (day.score == null) continue;
       if (!best || day.score > best.score + 3) best = day;
     }
-    return { days, best };
+    return { days, best, target };
   }
 
   // dryFrac < 0.9 → the load won't fully dry outdoors, so never call it "great"
@@ -286,8 +420,9 @@ const Core = (() => {
   function avg(a) { const v = a.filter(x => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; }
   function std(a) { const m = avg(a); return Math.sqrt(avg(a.map(x => (x - m) ** 2))); }
 
-  return { TZ, MODELS, ENS_MODELS, HOURLY_VARS, ZONES, DAYS, DRY_TARGET, nearestZone, todayYMD, addDays,
-    dryingRate, parseDeterministic, parseEnsemble, analyse, verdict };
+  return { TZ, MODELS, PREV_MODELS, ENSEMBLES, ENS_MODELS, HOURLY_VARS, ZONES, DAYS, LOADS, DRY_TARGET,
+    nearestZone, todayYMD, addDays, dryingRate, hygroFactor,
+    parseDeterministic, parseEnsemble, parsePrevious, analyse, verdict };
 })();
 
 if (typeof module !== 'undefined') module.exports = Core;
